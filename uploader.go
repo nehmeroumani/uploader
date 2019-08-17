@@ -31,11 +31,12 @@ var (
 	svgContentTypes = []string{"image/svg+xml", "text/xml", "text/xml; charset=utf-8", "text/plain; charset=utf-8"}
 
 	baseLocalUploadDirPath, baseCloudUploadDirPath, baseLocalUploadUrlPath, baseCloudUploadUrlPath string
-	uploadToCloud                                                                                  bool
+	uploadToCloud, debugMode                                                                       bool
 )
 
-func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, ImageSizes map[string][]*izero.ImageSize) {
+func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, ImageSizes map[string][]*izero.ImageSize, DebugMode bool) {
 	imageSizes = ImageSizes
+	debugMode = DebugMode
 	if !UploadToCloud {
 		baseLocalUploadDirPath = filepath.FromSlash(BaseUploadDirPath)
 		baseLocalUploadUrlPath = BaseUploadUrlPath
@@ -79,6 +80,9 @@ func (this *MultipleUpload) Upload() ([]string, []*UploadErr) {
 			} else {
 				m.Lock()
 				errs = append(errs, upErr)
+				if debugMode {
+					upErr.Print()
+				}
 			}
 		}(file)
 	}
