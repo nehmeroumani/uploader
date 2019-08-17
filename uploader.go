@@ -35,7 +35,7 @@ var (
 )
 
 func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, ImageSizes map[string][]*izero.ImageSize) {
-	imageSizes = imageSizes
+	imageSizes = ImageSizes
 	if !UploadToCloud {
 		baseLocalUploadDirPath = filepath.FromSlash(BaseUploadDirPath)
 		baseLocalUploadUrlPath = BaseUploadUrlPath
