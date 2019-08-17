@@ -3,7 +3,6 @@ package uploader
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"errors"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -14,18 +13,14 @@ import (
 	"sync"
 	"time"
 
-	"image/color"
-
 	"github.com/nehmeroumani/izero"
-
-	"github.com/nehmeroumani/pill.go/clean"
-	"github.com/nehmeroumani/pill.go/uploader/gcs"
+	"github.com/nehmeroumani/uploader/gcs"
 )
 
 var (
 	imageExtensions   = []string{".jpeg", ".jpg", ".gif", ".png"}
 	imageContentTypes = []string{"image/jpeg", "image/jpg", "image/gif", "image/png"}
-	imageSizes        map[string]map[string][]uint
+	imageSizes        map[string][]*izero.ImageSize
 
 	pdfContentTypes = []string{"application/pdf", "application/x-pdf", "application/acrobat", "applications/vnd.pdf", "text/pdf", "text/x-pdf"}
 
@@ -39,8 +34,8 @@ var (
 	uploadToCloud                                                                                  bool
 )
 
-func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, imgSizes map[string]map[string][]uint) {
-	imageSizes = imgSizes
+func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, ImageSizes map[string][]*izero.ImageSize) {
+	imageSizes = imageSizes
 	if !UploadToCloud {
 		baseLocalUploadDirPath = filepath.FromSlash(BaseUploadDirPath)
 		baseLocalUploadUrlPath = BaseUploadUrlPath
@@ -61,153 +56,129 @@ type MultipleUpload struct {
 	cloudUploadDirPath string
 	localUploadUrlPath string
 	cloudUploadUrlPath string
-	WithCrop           bool
-	BackgroundColor    *color.RGBA
 }
 
-func (this *MultipleUpload) Upload() (error, []string) {
-	if this.FormData != nil {
-		uploadedFilesNames := []string{}
-		errCh := make(chan error, 1)
-		finished := make(chan bool, 1)
+func (this *MultipleUpload) Upload() ([]string, []*UploadErr) {
+	uploadedFiles := []string{}
+	files := this.FormData.File[this.FilesInputName]
+	var (
+		errs []*UploadErr
+		wg   sync.WaitGroup
+		m    sync.Mutex
+	)
+	wg.Add(len(files))
+	for _, file := range files {
+		go func(file *multipart.FileHeader) {
+			defer func() {
+				wg.Done()
+				m.Unlock()
+			}()
+			if uploadedFile, upErr := this.UploadOneFile(file); upErr == nil {
+				m.Lock()
+				uploadedFiles = append(uploadedFiles, uploadedFile)
+			} else {
+				m.Lock()
+				errs = append(errs, upErr)
+			}
+		}(file)
+	}
+	wg.Wait()
+	return uploadedFiles, errs
+}
 
-		files := this.FormData.File[this.FilesInputName] // grab the filenames
-		var wg sync.WaitGroup
-		for _, file := range files {
-			this.UploadOneFile(file, &uploadedFilesNames, errCh, &wg)
-		}
-		go func() {
-			wg.Wait()
-			close(finished)
-		}()
-		select {
-		case <-finished:
-			return nil, uploadedFilesNames
-		case err := <-errCh:
+func (this *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (string, *UploadErr) {
+	file, err := fh.Open()
+
+	if err != nil {
+		return "", NewUploadErr(fh.Filename, err, nil)
+	}
+	defer file.Close()
+
+	fileExtension := strings.ToLower(filepath.Ext(fh.Filename))
+
+	fileData := make([]byte, 512)
+	_, err = file.Read(fileData)
+	if err != nil {
+		return "", NewUploadErr(fh.Filename, err, nil)
+	}
+
+	isValidFileType, fileType, fileTypeName := isValidFileType(this.FileType, fileData, fileExtension)
+
+	if !isValidFileType {
+		return "", NewUploadErr(fh.Filename, InvalidFileType, nil)
+	}
+	_, err = file.Seek(0, 0)
+	if err != nil {
+		return "", NewUploadErr(fh.Filename, err, nil)
+	}
+	randomFileName := generateRandomFileName(fileExtension)
+	if uploadToCloud {
+		err = UploadToCloud(gcs.GetClient(), file, this.PathOfFile(randomFileName))
+	} else {
+		if err = createFolderPath(this.localUploadDirPath); err == nil {
+			out, err := os.Create(filepath.Join(this.localUploadDirPath, randomFileName))
 			if err != nil {
-				return err, nil
+				return "", NewUploadErr(fh.Filename, err, nil)
+			}
+			defer out.Close()
+
+			_, err = io.Copy(out, file)
+		}
+	}
+	if err != nil {
+		return "", NewUploadErr(fh.Filename, err, nil)
+	}
+	if fileTypeName == "image" && this.ImageSizes != nil {
+		_, err = file.Seek(0, 0)
+		if err != nil {
+			return "", NewUploadErr(fh.Filename, err, nil)
+		}
+		var (
+			destPath      string
+			errs          map[string]error
+			resizedImages map[string]*izero.ResizedImage
+		)
+		if !uploadToCloud {
+			destPath = this.LocalUploadDirPath()
+		}
+		resizedImages, errs, err = izero.ResizeImage(file, randomFileName, fileType, this.imgCategoryTargetSizes(), destPath)
+		if err != nil {
+			return "", NewUploadErr(fh.Filename, err, errs)
+		}
+		if uploadToCloud {
+			var wg sync.WaitGroup
+			errs = map[string]error{}
+			wg.Add(len(resizedImages))
+			for sizeName, resizedImage := range resizedImages {
+				go func(sizeName string, resizedImage *izero.ResizedImage) {
+					defer wg.Done()
+					rImg, err := resizedImage.ToReader()
+					if err == nil {
+						if err = UploadToCloud(gcs.GetClient(), rImg, this.PathOfFile(randomFileName, sizeName)); err != nil {
+							errs[sizeName] = err
+						}
+					} else {
+						errs[sizeName] = err
+					}
+				}(sizeName, resizedImage)
+			}
+			wg.Wait()
+			if len(errs) > 0 {
+				err = UploadFailed
+				return "", NewUploadErr(fh.Filename, err, errs)
 			}
 		}
 	}
-	return errors.New("invalid multipartform"), nil
+	return randomFileName, nil
 }
 
-func (this *MultipleUpload) UploadOneFile(fh *multipart.FileHeader, uploadedFilesNames *[]string, errCh chan error, wg *sync.WaitGroup) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		file, err := fh.Open()
-		defer file.Close()
-
-		if err != nil {
-			clean.Error(err)
-			errCh <- err
-			return
-		}
-		fileExtension := filepath.Ext(fh.Filename)
-		fileExtension = strings.ToLower(fileExtension)
-
-		fileData := make([]byte, 512)
-		_, err = file.Read(fileData)
-		if err != nil {
-			clean.Error(err)
-			errCh <- err
-			return
-		}
-
-		isValidFileType, fileType, fileTypeName := isValidFileType(this.FileType, fileData, fileExtension)
-
-		if !isValidFileType {
-			err = errors.New("invalid_file_type")
-			errCh <- err
-			return
-		}
-
-		_, err = file.Seek(0, 0)
-		if err != nil {
-			clean.Error(err)
-			errCh <- err
-			return
-		}
-		randomFileName := generateRandomFileName(fileExtension)
-		if uploadToCloud {
-			if err = UploadToCloud(gcs.GetClient(), file, this.PathOfFile(randomFileName)); err == nil {
-				if fileTypeName == "image" && this.ImageSizes != nil {
-					_, err = file.Seek(0, 0)
-					if err != nil {
-						clean.Error(err)
-						errCh <- err
-						return
-					} else {
-						var resizedImages map[string]*izero.Img
-						if this.WithCrop {
-							resizedImages, err = izero.ResizeImgWithCroping(file, randomFileName, fileType, this.ImgCategoryTargetSizes())
-						} else {
-							resizedImages, err = izero.ResizeImgWithoutCroping(file, randomFileName, fileType, this.ImgCategoryTargetSizes(), this.BackgroundColor)
-						}
-						if err != nil {
-							clean.Error(err)
-						} else {
-							var wg sync.WaitGroup
-							for sizeName, resizedImage := range resizedImages {
-								GoUploadToCloud(gcs.GetClient(), resizedImage.ToReader(), this.PathOfFile(randomFileName, sizeName), &wg)
-							}
-							wg.Wait()
-						}
-					}
-				}
-				*uploadedFilesNames = append(*uploadedFilesNames, randomFileName)
-			} else {
-				clean.Error(err)
-				errCh <- err
-				return
-			}
-		} else {
-			if ok, pathErr := CreateFolderPath(this.localUploadDirPath); ok {
-				out, err := os.Create(filepath.Join(this.localUploadDirPath, randomFileName))
-				defer out.Close()
-				if err != nil {
-					err = errors.New("Unable to create the file for writing. Check your write access privilege : " + err.Error())
-					clean.Error(err)
-					errCh <- err
-					return
-				}
-				_, err = io.Copy(out, file)
-
-				if err != nil {
-					clean.Error(err)
-					errCh <- err
-					return
-				}
-				_, err = file.Seek(0, 0)
-				if err != nil {
-					clean.Error(err)
-					errCh <- err
-					return
-				}
-				if fileTypeName == "image" && this.ImageSizes != nil {
-					if this.WithCrop {
-						izero.ResizeImgWithCroping(file, randomFileName, fileType, this.ImgCategoryTargetSizes(), this.LocalUploadDirPath())
-					} else {
-						izero.ResizeImgWithoutCroping(file, randomFileName, fileType, this.ImgCategoryTargetSizes(), this.LocalUploadDirPath(), this.BackgroundColor)
-					}
-				}
-				*uploadedFilesNames = append(*uploadedFilesNames, randomFileName)
-			} else {
-				errCh <- pathErr
-				return
-			}
-		}
-	}()
-}
-
-func (this *MultipleUpload) ImgCategoryTargetSizes() map[string][]uint {
+func (this *MultipleUpload) imgCategoryTargetSizes() []*izero.ImageSize {
 	if categorySizes, ok := imageSizes[this.ImageCategory]; ok {
-		targetSizes := map[string][]uint{}
-		for sizeName, size := range categorySizes {
+		targetSizes := []*izero.ImageSize{}
+		for _, imgSize := range categorySizes {
 			for _, s := range this.ImageSizes {
-				if s == sizeName {
-					targetSizes[s] = size
+				if s == imgSize.Name {
+					targetSizes = append(targetSizes, imgSize)
 					break
 				}
 			}
@@ -399,15 +370,15 @@ func isValidFileType(requiredFileTypesRaw string, fileData []byte, fileExtension
 	return isValidContentType && isValidExtension, fileType, fileTypeName
 }
 
-func CreateFolderPath(path string) (bool, error) {
+func createFolderPath(path string) error {
 	_, err := os.Stat(path)
 	if err == nil {
-		return true, nil
+		return nil
 	}
 	if os.IsNotExist(err) {
 		if err = os.MkdirAll(path, 0777); err != nil {
-			return false, err
+			return err
 		}
 	}
-	return true, err
+	return nil
 }
