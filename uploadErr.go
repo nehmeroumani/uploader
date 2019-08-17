@@ -1,6 +1,10 @@
 package uploader
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/fatih/color"
+)
 
 type UploadErr struct {
 	FileName   string
@@ -9,11 +13,11 @@ type UploadErr struct {
 }
 
 func (upErr *UploadErr) Print() {
-	fmt.Println(upErr.FileName)
-	fmt.Println("Error : ", upErr.Err)
+	fmt.Println(color.RedString("File name : "), upErr.FileName)
+	fmt.Println(color.RedString("Error : "), upErr.Err)
 	if upErr.ResizeErrs != nil {
 		for sizeName, err := range upErr.ResizeErrs {
-			fmt.Println(sizeName+" : ", err)
+			fmt.Println(color.RedString(sizeName+" : "), err)
 		}
 	}
 }
