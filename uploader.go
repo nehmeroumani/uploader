@@ -30,6 +30,12 @@ var (
 	svgExtensions   = []string{".svg", ".svgz"}
 	svgContentTypes = []string{"image/svg+xml", "text/xml", "text/xml; charset=utf-8", "text/plain; charset=utf-8"}
 
+	audioExtensions   = []string{".flac", ".m3u", ".m3u8", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".pls", ".wav"}
+	audioContentTypes = []string{"audio/flac", "audio/webm", "audio/mpegurl", "text/plain", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/x-scpls", "audio/wav"}
+
+	videoExtensions   = []string{".mp4", ".m3u8", ".ts", ".3gp", ".mov", ".avi", ".wmv", ".ogv", ".m4a", ".m4p", ".m4b", ".m4r", ".m4v"}
+	videoContentTypes = []string{"video/mp4", "application/mp4", "application/x-mpegurl", "video/mp2t", "video/3gpp", "video/quicktime", "video/x-msvideo", "video/x-ms-wmv"}
+
 	baseLocalUploadDirPath, baseCloudUploadDirPath, baseLocalUploadUrlPath, baseCloudUploadUrlPath string
 	uploadToCloud, debugMode                                                                       bool
 )
@@ -314,7 +320,7 @@ func isValidFileType(requiredFileTypesRaw string, fileData []byte, fileExtension
 			}
 			if isValidExtension {
 				for _, imageContentType := range imageContentTypes {
-					if fileType == imageContentType {
+					if imageContentType == fileType {
 						isValidContentType = true
 						break
 					}
@@ -330,7 +336,7 @@ func isValidFileType(requiredFileTypesRaw string, fileData []byte, fileExtension
 			}
 			if isValidExtension {
 				for _, documentContentType := range documentContentTypes {
-					if fileType == documentContentType {
+					if documentContentType == fileType {
 						isValidContentType = true
 						break
 					}
@@ -346,7 +352,7 @@ func isValidFileType(requiredFileTypesRaw string, fileData []byte, fileExtension
 			}
 			if isValidExtension {
 				for _, svgContentType := range svgContentTypes {
-					if fileType == svgContentType {
+					if svgContentType == fileType {
 						isValidContentType = true
 						break
 					}
@@ -359,7 +365,39 @@ func isValidFileType(requiredFileTypesRaw string, fileData []byte, fileExtension
 			}
 			if isValidExtension {
 				for _, pdfContentType := range pdfContentTypes {
-					if fileType == pdfContentType {
+					if pdfContentType == fileType {
+						isValidContentType = true
+						break
+					}
+				}
+			}
+		case "audio":
+			fileTypeName = "audio"
+			for _, audioExtension := range audioExtensions {
+				if audioExtension == fileExtension {
+					isValidExtension = true
+					break
+				}
+			}
+			if isValidExtension {
+				for _, audioContentType := range audioContentTypes {
+					if audioContentType == fileType {
+						isValidContentType = true
+						break
+					}
+				}
+			}
+		case "video":
+			fileTypeName = "video"
+			for _, videoExtension := range videoExtensions {
+				if videoExtension == fileExtension {
+					isValidExtension = true
+					break
+				}
+			}
+			if isValidExtension {
+				for _, videoContentType := range videoContentTypes {
+					if videoContentType == fileType {
 						isValidContentType = true
 						break
 					}
