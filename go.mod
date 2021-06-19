@@ -1,4 +1,4 @@
-module github.com/nehmeroumani/uploader
+module github.com/nehmeroumani/uploader/v2
 
 go 1.16
 
