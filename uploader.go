@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"io"
 	"mime/multipart"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,30 +13,14 @@ import (
 	"time"
 
 	"github.com/nehmeroumani/izero"
-	"github.com/nehmeroumani/uploader/gcs"
+	"github.com/nehmeroumani/uploader/v2/gcs"
 )
 
 var (
-	imageExtensions   = []string{".jpeg", ".jpg", ".gif", ".png"}
-	imageContentTypes = []string{"image/jpeg", "image/jpg", "image/gif", "image/png"}
-	imageSizes        map[string][]*izero.ImageSize
-
-	pdfContentTypes = []string{"application/pdf", "application/x-pdf", "application/acrobat", "applications/vnd.pdf", "text/pdf", "text/x-pdf"}
-
-	documentExtensions   = []string{".doc", ".dot", ".docx", ".dotx", ".docm", ".dotm"}
-	documentContentTypes = []string{"application/zip", "application/msword", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "application/vnd.openxmlformats-officedocument.wordprocessingml.template", "application/vnd.ms-word.document.macroEnabled.12", "application/vnd.ms-word.template.macroEnabled.12"}
-
-	svgExtensions   = []string{".svg", ".svgz"}
-	svgContentTypes = []string{"image/svg+xml", "text/xml", "text/xml; charset=utf-8", "text/plain; charset=utf-8"}
-
-	audioExtensions   = []string{".flac", ".m3u", ".m3u8", ".m4a", ".m4b", ".mp3", ".ogg", ".opus", ".pls", ".wav"}
-	audioContentTypes = []string{"audio/flac", "audio/webm", "audio/mpegurl", "text/plain", "audio/mp4", "audio/mpeg", "audio/ogg", "audio/x-scpls", "audio/wav"}
-
-	videoExtensions   = []string{".mp4", ".m3u8", ".ts", ".3gp", ".mov", ".avi", ".wmv", ".ogv", ".m4a", ".m4p", ".m4b", ".m4r", ".m4v"}
-	videoContentTypes = []string{"video/mp4", "application/mp4", "application/x-mpegurl", "video/mp2t", "video/3gpp", "video/quicktime", "video/x-msvideo", "video/x-ms-wmv"}
-
-	baseLocalUploadDirPath, baseCloudUploadDirPath, baseLocalUploadUrlPath, baseCloudUploadUrlPath string
-	uploadToCloud, debugMode                                                                       bool
+	imageSizes                                     map[string][]*izero.ImageSize
+	baseLocalUploadDirPath, baseCloudUploadDirPath string
+	baseLocalUploadUrlPath, baseCloudUploadUrlPath string
+	uploadToCloud, debugMode                       bool
 )
 
 func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, ImageSizes map[string][]*izero.ImageSize, DebugMode bool) {
@@ -65,8 +48,8 @@ type MultipleUpload struct {
 	cloudUploadUrlPath string
 }
 
-func (mu *MultipleUpload) Upload() ([]string, []*UploadErr) {
-	uploadedFiles := []string{}
+func (mu *MultipleUpload) Upload() ([]*UploadedFile, []*UploadErr) {
+	uploadedFiles := []*UploadedFile{}
 	files := mu.FormData.File[mu.FilesInputName]
 	var (
 		errs []*UploadErr
@@ -96,11 +79,11 @@ func (mu *MultipleUpload) Upload() ([]string, []*UploadErr) {
 	return uploadedFiles, errs
 }
 
-func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (string, *UploadErr) {
+func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile, *UploadErr) {
 	file, err := fh.Open()
 
 	if err != nil {
-		return "", NewUploadErr(fh.Filename, err, nil)
+		return nil, NewUploadErr(fh.Filename, err, nil)
 	}
 	defer file.Close()
 
@@ -109,10 +92,10 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (string, *Uplo
 	fileData := make([]byte, 512)
 	_, err = file.Read(fileData)
 	if err != nil {
-		return "", NewUploadErr(fh.Filename, err, nil)
+		return nil, NewUploadErr(fh.Filename, err, nil)
 	}
 
-	isValidFileType, fileType, fileTypeName := isValidFileType(mu.FileType, fileData, fileExtension)
+isValidFileType, fileType, fileTypeName := DetectFileType(http.DetectContentType(fileData), fileExtension)
 
 	if !isValidFileType {
 		return "", NewUploadErr(fh.Filename, InvalidFileType, nil)
@@ -122,6 +105,7 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (string, *Uplo
 		return "", NewUploadErr(fh.Filename, err, nil)
 	}
 	randomFileName := generateRandomFileName(fileExtension)
+
 	if uploadToCloud {
 		err = UploadToCloud(gcs.GetClient(), file, mu.PathOfFile(randomFileName))
 	} else {
@@ -138,6 +122,7 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (string, *Uplo
 	if err != nil {
 		return "", NewUploadErr(fh.Filename, err, nil)
 	}
+
 	if fileTypeName == "image" && mu.ImageSizes != nil {
 		_, err = file.Seek(0, 0)
 		if err != nil {
@@ -291,125 +276,6 @@ func generateRandomFileName(extension string) string {
 	randBytes := make([]byte, 16)
 	rand.Read(randBytes)
 	return strconv.Itoa(int(time.Now().UTC().Unix())) + "-" + hex.EncodeToString(randBytes) + extension
-}
-
-func detectContentType(fileData []byte) string {
-	if fileData != nil {
-		filetype := http.DetectContentType(fileData)
-		return filetype
-	}
-	return ""
-}
-
-func isValidFileType(requiredFileTypesRaw string, fileData []byte, fileExtension string) (bool, string, string) {
-	isValidExtension := false
-	isValidContentType := false
-	fileType := detectContentType(fileData)
-	fileTypeName := ""
-	requiredFileTypesRaw = strings.ToLower(strings.Replace(requiredFileTypesRaw, " ", "", -1))
-	requiredFileTypes := strings.Split(requiredFileTypesRaw, "|")
-	for _, requiredFileType := range requiredFileTypes {
-		switch requiredFileType {
-		case "image":
-			fileTypeName = "image"
-			for _, imageExtension := range imageExtensions {
-				if imageExtension == fileExtension {
-					isValidExtension = true
-					break
-				}
-			}
-			if isValidExtension {
-				for _, imageContentType := range imageContentTypes {
-					if imageContentType == fileType {
-						isValidContentType = true
-						break
-					}
-				}
-			}
-		case "document":
-			fileTypeName = "document"
-			for _, documentExtension := range documentExtensions {
-				if documentExtension == fileExtension {
-					isValidExtension = true
-					break
-				}
-			}
-			if isValidExtension {
-				for _, documentContentType := range documentContentTypes {
-					if documentContentType == fileType {
-						isValidContentType = true
-						break
-					}
-				}
-			}
-		case "svg":
-			fileTypeName = "svg"
-			for _, svgExtension := range svgExtensions {
-				if svgExtension == fileExtension {
-					isValidExtension = true
-					break
-				}
-			}
-			if isValidExtension {
-				for _, svgContentType := range svgContentTypes {
-					if svgContentType == fileType {
-						isValidContentType = true
-						break
-					}
-				}
-			}
-		case "pdf":
-			fileTypeName = "pdf"
-			if fileExtension == ".pdf" {
-				isValidExtension = true
-			}
-			if isValidExtension {
-				for _, pdfContentType := range pdfContentTypes {
-					if pdfContentType == fileType {
-						isValidContentType = true
-						break
-					}
-				}
-			}
-		case "audio":
-			fileTypeName = "audio"
-			for _, audioExtension := range audioExtensions {
-				if audioExtension == fileExtension {
-					isValidExtension = true
-					break
-				}
-			}
-			if isValidExtension {
-				for _, audioContentType := range audioContentTypes {
-					if audioContentType == fileType {
-						isValidContentType = true
-						break
-					}
-				}
-			}
-		case "video":
-			fileTypeName = "video"
-			for _, videoExtension := range videoExtensions {
-				if videoExtension == fileExtension {
-					isValidExtension = true
-					break
-				}
-			}
-			if isValidExtension {
-				for _, videoContentType := range videoContentTypes {
-					if videoContentType == fileType {
-						isValidContentType = true
-						break
-					}
-				}
-			}
-		}
-
-		if isValidExtension {
-			break
-		}
-	}
-	return isValidContentType && isValidExtension, fileType, fileTypeName
 }
 
 func createFolderPath(path string) error {
