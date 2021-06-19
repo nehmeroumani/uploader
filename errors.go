@@ -3,7 +3,9 @@ package uploader
 import "errors"
 
 var (
-	InvalidForm     = errors.New("invalid_form")
-	UploadFailed    = errors.New("upload_failed")
-	InvalidFileType = errors.New("invalid_file_type")
+	ErrInvalidForm         = errors.New("invalid_form")
+	ErrUploadFailed        = errors.New("upload_failed")
+	ErrInvalidFileType     = errors.New("invalid_file_type")
+	ErrInvalidImage        = errors.New("invalid_image")
+	ErrUnsulportedFileType = errors.New("unsupported_file_type")
 )

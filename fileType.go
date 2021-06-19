@@ -76,5 +76,14 @@ func DetectFileType(contentType string, extension string) (*FileType, error) {
 			return fileType, nil
 		}
 	}
-	return nil, ErrUnknownFileType
+	return nil, ErrUnsulportedFileType
+}
+
+func IsValidFileType(fileType *FileType, validFileTypes []*FileType) bool {
+	for _, validFileType := range validFileTypes{
+		if fileType == validFileType{
+			return true
+		}
+	}
+	return false
 }

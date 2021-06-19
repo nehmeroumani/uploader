@@ -11,7 +11,9 @@ const (
 type UploadedFile struct {
 	Name         string
 	OriginalName string
-	Type         string
+	ContentType  string
+	Extension    string
+	FileType     *FileType
 	Numbers      []int64
 }
 

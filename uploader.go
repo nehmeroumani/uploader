@@ -3,8 +3,10 @@ package uploader
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"image"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -38,8 +40,8 @@ func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool
 
 type MultipleUpload struct {
 	FormData           *multipart.Form
-	FilesInputName     string
-	FileType           string
+	FileInputName     string
+	ValidFileTypes     []*FileType
 	ImageSizes         []string
 	ImageCategory      string
 	localUploadDirPath string
@@ -50,7 +52,7 @@ type MultipleUpload struct {
 
 func (mu *MultipleUpload) Upload() ([]*UploadedFile, []*UploadErr) {
 	uploadedFiles := []*UploadedFile{}
-	files := mu.FormData.File[mu.FilesInputName]
+	files := mu.FormData.File[mu.FileInputName]
 	var (
 		errs []*UploadErr
 		wg   sync.WaitGroup
@@ -80,39 +82,52 @@ func (mu *MultipleUpload) Upload() ([]*UploadedFile, []*UploadErr) {
 }
 
 func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile, *UploadErr) {
-	file, err := fh.Open()
+	uploadedFile := &UploadedFile{
+		OriginalName: fh.Filename,
+		Extension:    strings.ToLower(filepath.Ext(fh.Filename)),
+	}
 
+	file, err := fh.Open()
 	if err != nil {
-		return nil, NewUploadErr(fh.Filename, err, nil)
+		return nil, NewUploadErr(uploadedFile, err, nil)
 	}
 	defer file.Close()
 
-	fileExtension := strings.ToLower(filepath.Ext(fh.Filename))
+	uploadedFile.SetNumber(SizeNumber, fh.Size)
 
+	// detect file type
 	fileData := make([]byte, 512)
 	_, err = file.Read(fileData)
 	if err != nil {
-		return nil, NewUploadErr(fh.Filename, err, nil)
+		return nil, NewUploadErr(uploadedFile, err, nil)
 	}
 
-isValidFileType, fileType, fileTypeName := DetectFileType(http.DetectContentType(fileData), fileExtension)
+	uploadedFile.ContentType = http.DetectContentType(fileData)
 
-	if !isValidFileType {
-		return "", NewUploadErr(fh.Filename, InvalidFileType, nil)
+	uploadedFile.FileType, err = DetectFileType(uploadedFile.ContentType, uploadedFile.Extension)
+	if err != nil {
+		return nil, NewUploadErr(uploadedFile, err, nil)
 	}
+
+	if !IsValidFileType(uploadedFile.FileType, mu.ValidFileTypes) {
+		return nil, NewUploadErr(uploadedFile, ErrInvalidFileType, nil)
+	}
+
+	// reset reading cursor
 	_, err = file.Seek(0, 0)
 	if err != nil {
-		return "", NewUploadErr(fh.Filename, err, nil)
+		return nil, NewUploadErr(uploadedFile, err, nil)
 	}
-	randomFileName := generateRandomFileName(fileExtension)
+
+	uploadedFile.Name = generateRandomFileName(uploadedFile.Extension)
 
 	if uploadToCloud {
-		err = UploadToCloud(gcs.GetClient(), file, mu.PathOfFile(randomFileName))
+		err = UploadToCloud(gcs.GetClient(), file, mu.PathOfFile(uploadedFile.Name))
 	} else {
 		if err = createFolderPath(mu.localUploadDirPath); err == nil {
-			out, err := os.Create(filepath.Join(mu.localUploadDirPath, randomFileName))
+			out, err := os.Create(filepath.Join(mu.localUploadDirPath, uploadedFile.Name))
 			if err != nil {
-				return "", NewUploadErr(fh.Filename, err, nil)
+				return nil, NewUploadErr(uploadedFile, err, nil)
 			}
 			defer out.Close()
 
@@ -120,51 +135,71 @@ isValidFileType, fileType, fileTypeName := DetectFileType(http.DetectContentType
 		}
 	}
 	if err != nil {
-		return "", NewUploadErr(fh.Filename, err, nil)
+		return nil, NewUploadErr(uploadedFile, err, nil)
 	}
 
-	if fileTypeName == "image" && mu.ImageSizes != nil {
+	if uploadedFile.FileType == ImageFileType {
+		// reset reading cursor
 		_, err = file.Seek(0, 0)
 		if err != nil {
-			return "", NewUploadErr(fh.Filename, err, nil)
+			return nil, NewUploadErr(uploadedFile, err, nil)
 		}
-		var (
-			destPath      string
-			errs          map[string]error
-			resizedImages map[string]*izero.ResizedImage
-		)
-		if !uploadToCloud {
-			destPath = mu.LocalUploadDirPath()
-		}
-		resizedImages, errs, err = izero.ResizeImage(file, randomFileName, fileType, mu.imgCategoryTargetSizes(), destPath)
+		// extract image dimensions
+		var imgConfig image.Config
+		imgConfig, _, err = image.DecodeConfig(file)
 		if err != nil {
-			return "", NewUploadErr(fh.Filename, err, errs)
+			return nil, NewUploadErr(uploadedFile, ErrInvalidImage, nil)
 		}
-		if uploadToCloud {
-			var wg sync.WaitGroup
-			errs = map[string]error{}
-			wg.Add(len(resizedImages))
-			for sizeName, resizedImage := range resizedImages {
-				go func(sizeName string, resizedImage *izero.ResizedImage) {
-					defer wg.Done()
-					rImg, err := resizedImage.ToReader()
-					if err == nil {
-						if err = UploadToCloud(gcs.GetClient(), rImg, mu.PathOfFile(randomFileName, sizeName)); err != nil {
+		uploadedFile.SetNumber(WidthNumber, int64(imgConfig.Width))
+		uploadedFile.SetNumber(HeightNumber, int64(imgConfig.Height))
+
+		if len(mu.ImageSizes) > 0 {
+			// reset reading cursor
+			_, err = file.Seek(0, 0)
+			if err != nil {
+				return nil, NewUploadErr(uploadedFile, err, nil)
+			}
+
+			// resize image
+			var (
+				destPath      string
+				errs          map[string]error
+				resizedImages map[string]*izero.ResizedImage
+			)
+			if !uploadToCloud {
+				destPath = mu.LocalUploadDirPath()
+			}
+			resizedImages, errs, err = izero.ResizeImage(file, uploadedFile.Name, uploadedFile.ContentType, mu.imgCategoryTargetSizes(), destPath)
+			if err != nil {
+				return nil, NewUploadErr(uploadedFile, err, errs)
+			}
+			if uploadToCloud {
+				var wg sync.WaitGroup
+				errs = map[string]error{}
+				wg.Add(len(resizedImages))
+				for sizeName, resizedImage := range resizedImages {
+					go func(sizeName string, resizedImage *izero.ResizedImage) {
+						defer wg.Done()
+						rImg, err := resizedImage.ToReader()
+						if err == nil {
+							if err = UploadToCloud(gcs.GetClient(), rImg, mu.PathOfFile(uploadedFile.Name, sizeName)); err != nil {
+								errs[sizeName] = err
+							}
+						} else {
 							errs[sizeName] = err
 						}
-					} else {
-						errs[sizeName] = err
-					}
-				}(sizeName, resizedImage)
-			}
-			wg.Wait()
-			if len(errs) > 0 {
-				err = UploadFailed
-				return "", NewUploadErr(fh.Filename, err, errs)
+					}(sizeName, resizedImage)
+				}
+				wg.Wait()
+
+				if len(errs) > 0 {
+					err = ErrUploadFailed
+					return nil, NewUploadErr(uploadedFile, err, errs)
+				}
 			}
 		}
 	}
-	return randomFileName, nil
+	return uploadedFile, nil
 }
 
 func (mu *MultipleUpload) imgCategoryTargetSizes() []*izero.ImageSize {
