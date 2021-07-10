@@ -40,9 +40,9 @@ func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool
 
 type MultipleUpload struct {
 	FormData           *multipart.Form
-	FileInputName     string
+	FileInputName      string
 	ValidFileTypes     []*FileType
-	ImageSizes         []string
+	ImageSizes         []*izero.ImageSize
 	ImageCategory      string
 	localUploadDirPath string
 	cloudUploadDirPath string
@@ -153,7 +153,8 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile
 		uploadedFile.SetNumber(WidthNumber, int64(imgConfig.Width))
 		uploadedFile.SetNumber(HeightNumber, int64(imgConfig.Height))
 
-		if len(mu.ImageSizes) > 0 {
+		targetImageSizes := mu.TargetImageSizes()
+		if len(targetImageSizes) > 0 {
 			// reset reading cursor
 			_, err = file.Seek(0, 0)
 			if err != nil {
@@ -169,7 +170,7 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile
 			if !uploadToCloud {
 				destPath = mu.LocalUploadDirPath()
 			}
-			resizedImages, errs, err = izero.ResizeImage(file, uploadedFile.Name, uploadedFile.ContentType, mu.imgCategoryTargetSizes(), destPath)
+			resizedImages, errs, err = izero.ResizeImage(file, uploadedFile.Name, uploadedFile.ContentType, targetImageSizes, destPath)
 			if err != nil {
 				return nil, NewUploadErr(uploadedFile, err, errs)
 			}
@@ -202,18 +203,12 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile
 	return uploadedFile, nil
 }
 
-func (mu *MultipleUpload) imgCategoryTargetSizes() []*izero.ImageSize {
+func (mu *MultipleUpload) TargetImageSizes() []*izero.ImageSize {
+	if mu.ImageSizes != nil {
+		return mu.ImageSizes
+	}
 	if categorySizes, ok := imageSizes[mu.ImageCategory]; ok {
-		targetSizes := []*izero.ImageSize{}
-		for _, imgSize := range categorySizes {
-			for _, s := range mu.ImageSizes {
-				if s == imgSize.Name {
-					targetSizes = append(targetSizes, imgSize)
-					break
-				}
-			}
-		}
-		return targetSizes
+		return categorySizes
 	}
 	return nil
 }
