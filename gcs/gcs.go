@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"cloud.google.com/go/storage"
@@ -126,6 +127,9 @@ func (this *Client) WriteObject(file io.Reader, path string) error {
 			wc := this.gcsClient.Bucket(this.PublicBucketName).Object(path).NewWriter(ctx)
 			wc.ACL = []storage.ACLRule{{Entity: storage.AllUsers, Role: storage.RoleReader}, {Entity: storage.ACLEntity("project-owners-" + this.ProjectNumber), Role: storage.RoleOwner}, {Entity: storage.ACLEntity("project-editors-" + this.ProjectNumber), Role: storage.RoleOwner}}
 			wc.CacheControl = "public, max-age=15552000"
+			if strings.ToLower(filepath.Ext(path)) == ".svg" {
+				wc.ContentType = "image/svg+xml"
+			}
 			if _, err := io.Copy(wc, file); err != nil {
 				clean.Error(err)
 				return err
