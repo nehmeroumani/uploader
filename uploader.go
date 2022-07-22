@@ -15,27 +15,27 @@ import (
 	"time"
 
 	"github.com/nehmeroumani/izero"
-	"github.com/nehmeroumani/uploader/v2/gcs"
 )
 
 var (
 	imageSizes                                     map[string][]*izero.ImageSize
 	baseLocalUploadDirPath, baseCloudUploadDirPath string
 	baseLocalUploadUrlPath, baseCloudUploadUrlPath string
-	uploadToCloud, debugMode                       bool
+	cloudUploader                                  CloudUploader
+	debugMode                                      bool
 )
 
-func Init(BaseUploadDirPath string, BaseUploadUrlPath string, UploadToCloud bool, ImageSizes map[string][]*izero.ImageSize, DebugMode bool) {
+func Init(BaseUploadDirPath string, BaseUploadUrlPath string, cUploader CloudUploader, ImageSizes map[string][]*izero.ImageSize, DebugMode bool) {
 	imageSizes = ImageSizes
 	debugMode = DebugMode
-	if !UploadToCloud {
+	if cUploader == nil {
 		baseLocalUploadDirPath = filepath.FromSlash(BaseUploadDirPath)
 		baseLocalUploadUrlPath = BaseUploadUrlPath
 	} else {
 		baseCloudUploadUrlPath = BaseUploadUrlPath
 		baseCloudUploadDirPath = filepath.FromSlash(BaseUploadDirPath)
 	}
-	uploadToCloud = UploadToCloud
+	cloudUploader = cUploader
 }
 
 type MultipleUpload struct {
@@ -121,8 +121,8 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile
 
 	uploadedFile.Name = generateRandomFileName(uploadedFile.Extension)
 
-	if uploadToCloud {
-		err = UploadToCloud(gcs.GetClient(), file, mu.PathOfFile(uploadedFile.Name))
+	if cloudUploader != nil {
+		err = UploadToCloud(cloudUploader, file, mu.PathOfFile(uploadedFile.Name))
 	} else {
 		if err = createFolderPath(mu.localUploadDirPath); err == nil {
 			out, err := os.Create(filepath.Join(mu.localUploadDirPath, uploadedFile.Name))
@@ -167,14 +167,14 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile
 				errs          map[string]error
 				resizedImages map[string]*izero.ResizedImage
 			)
-			if !uploadToCloud {
+			if cloudUploader == nil {
 				destPath = mu.LocalUploadDirPath()
 			}
 			resizedImages, errs, err = izero.ResizeImage(file, uploadedFile.Name, uploadedFile.ContentType, targetImageSizes, destPath)
 			if err != nil {
 				return nil, NewUploadErr(uploadedFile, err, errs)
 			}
-			if uploadToCloud {
+			if cloudUploader != nil {
 				var wg sync.WaitGroup
 				errs = map[string]error{}
 				wg.Add(len(resizedImages))
@@ -183,7 +183,7 @@ func (mu *MultipleUpload) UploadOneFile(fh *multipart.FileHeader) (*UploadedFile
 						defer wg.Done()
 						rImg, err := resizedImage.ToReader()
 						if err == nil {
-							if err = UploadToCloud(gcs.GetClient(), rImg, mu.PathOfFile(uploadedFile.Name, sizeName)); err != nil {
+							if err = UploadToCloud(cloudUploader, rImg, mu.PathOfFile(uploadedFile.Name, sizeName)); err != nil {
 								errs[sizeName] = err
 							}
 						} else {
@@ -232,7 +232,7 @@ func (mu *MultipleUpload) CloudUploadDirPath() string {
 }
 
 func (mu *MultipleUpload) SetUploadDir(dir string) {
-	if uploadToCloud {
+	if cloudUploader != nil {
 		mu.SetCloudUploadDir(dir)
 		if baseCloudUploadUrlPath != "" {
 			mu.cloudUploadUrlPath = baseCloudUploadUrlPath + "/" + strings.Replace(dir, `\`, "/", -1)
@@ -246,7 +246,7 @@ func (mu *MultipleUpload) SetUploadDir(dir string) {
 }
 
 func (mu *MultipleUpload) UploadDirPath() string {
-	if uploadToCloud {
+	if cloudUploader != nil {
 		return mu.cloudUploadDirPath
 	} else {
 		return mu.localUploadDirPath
@@ -254,7 +254,7 @@ func (mu *MultipleUpload) UploadDirPath() string {
 }
 
 func (mu *MultipleUpload) UploadUrlPath() string {
-	if uploadToCloud {
+	if cloudUploader != nil {
 		return mu.cloudUploadUrlPath
 	} else {
 		return mu.localUploadUrlPath
@@ -265,7 +265,7 @@ func (mu *MultipleUpload) UrlOfFile(fileName string, opts ...string) string {
 	if opts != nil && len(opts) > 0 {
 		sizeName = strings.ToLower(strings.TrimSpace(opts[0]))
 	}
-	if uploadToCloud {
+	if cloudUploader != nil {
 		if sizeName != "" && sizeName != "original" {
 			return mu.cloudUploadUrlPath + "/" + sizeName + "/" + fileName
 		}
@@ -282,7 +282,7 @@ func (mu *MultipleUpload) PathOfFile(fileName string, opts ...string) string {
 	if opts != nil && len(opts) > 0 {
 		sizeName = strings.ToLower(strings.TrimSpace(opts[0]))
 	}
-	if uploadToCloud {
+	if cloudUploader != nil {
 		if sizeName != "" && sizeName != "original" {
 			return filepath.Join(mu.cloudUploadDirPath, sizeName, fileName)
 		}
@@ -295,7 +295,7 @@ func (mu *MultipleUpload) PathOfFile(fileName string, opts ...string) string {
 }
 
 func (mu *MultipleUpload) AttachmentFileURI(fileName string, opts ...string) string {
-	if uploadToCloud {
+	if cloudUploader != nil {
 		return mu.UrlOfFile(fileName, opts...)
 	} else {
 		return mu.PathOfFile(fileName, opts...)
